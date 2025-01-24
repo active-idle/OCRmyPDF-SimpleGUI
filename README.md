@@ -5,6 +5,8 @@ select input and output PDF files, configure OCR options, and execute the OCR pr
 The application supports saving/loading settings and drag-and-drop functionality for
 input files.
 
+![Alt text](./gui.png)
+
 ## Dependencies
 - Python Libraries:
   - PyQt5: Install using `pip install PyQt5`
