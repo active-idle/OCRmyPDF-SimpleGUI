@@ -13,4 +13,4 @@ Features:
 - Mouse pointer displays processing
 - Open output file automatically after OCR
 
-Thank you very much for a donation in recognition of my work: [![Paypal Donate](https://img.shields.io/badge/paypal-donate-yellow.svg)](https://www.paypal.com/paypal.me/MrDagoo/)
+Thank you very much for a donation in recognition of my work: [![Paypal Donate](https://img.shields.io/badge/paypal-donate-yellow.svg)](https://www.paypal.com/paypalme/MrDagoo/)
