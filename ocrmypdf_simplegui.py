@@ -47,7 +47,7 @@ from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QIcon, QPixmap, QCursor
 import io
 from contextlib import redirect_stderr
 
-SETTINGS_FILE = os.path.splitext(os.path.basename(__file__))[0] + ".json"
+SETTINGS_FILE = "." + os.path.splitext(os.path.basename(__file__))[0] + ".json"
 PDF_FILTER = "PDF files (*.pdf)"
 
 class OCRWorker(QThread):
@@ -85,7 +85,7 @@ class AboutDialog(QDialog):
         super().__init__()
         self.setWindowTitle("About OCRmyPDF SimpleGUI")
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint & ~Qt.WindowSystemMenuHint)
-        self.setWindowIcon(QIcon('icon_small.png'))
+        self.setWindowIcon(QIcon('./ocrmypdf_simplegui.png'))
 
         main_layout = QGridLayout()
 
@@ -97,7 +97,7 @@ class AboutDialog(QDialog):
         text_layout.addWidget(github_label)
 
         icon_label = QLabel()
-        pixmap = QPixmap('icon_big.png')
+        pixmap = QPixmap('./ocrmypdf_simplegui.png')
         scaled_pixmap = pixmap.scaled(70, 70, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         icon_label.setPixmap(scaled_pixmap)
 
@@ -139,7 +139,7 @@ class OCRmyPDFGUI(QWidget):
 
         self.setLayout(main_layout)
         self.setWindowTitle('OCRmyPDF SimpleGUI')
-        self.setWindowIcon(QIcon('icon_small.png'))
+        self.setWindowIcon(QIcon('./ocrmypdf_simplegui.png'))
         self.resize(600, 400)
         self.show()
         self.output_text.append("Please load an input file.")

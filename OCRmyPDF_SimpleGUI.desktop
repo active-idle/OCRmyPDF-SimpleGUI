@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Categories=Utility;
+GenericName=OCRmyPDF SimpleGUI
+Comment=A simple GUI for OCRmyPDF.
+MimeType=application/pdf;
+Terminal=false
+# place all files in ~/.local/bin/OCRmyPDF_SimpleGUI/
+Exec=/usr/bin/python "$HOME/.local/bin/OCRmyPDF_SimpleGUI/ocrmypdf_simplegui.py"
+# move icon file in ~/.local/share/icons
+Icon=ocrmypdf_simplegui.png
+# set the working directory to store the settings in a specific location
+# e.g. Path=<your home>/.local/bin/OCRmyPDF_SimpleGUI
