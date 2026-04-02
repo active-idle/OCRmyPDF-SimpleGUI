@@ -41,6 +41,7 @@ import json
 import os
 import subprocess
 import webbrowser
+import inspect
 from typing import Dict, Any
 from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QLineEdit, QPushButton, QTextEdit, QVBoxLayout, QHBoxLayout,
                              QGroupBox, QFileDialog, QCheckBox, QComboBox, QGridLayout, QSplitter, QProgressBar, QDialog, QSpacerItem, QSizePolicy, QToolButton, QToolTip)
@@ -68,9 +69,17 @@ class OCRWorker(QThread):
         """Run the OCR process in a separate thread."""
         try:
             from ocrmypdf import ocr
+            ocr_signature = inspect.signature(ocr)
+            ocr_kwargs = dict(self.options)
+
+            # Rich-style progress rendering can fail in some GUI/non-TTY contexts.
+            # Disable it when the installed OCRmyPDF API supports this option.
+            if 'progress_bar' in ocr_signature.parameters:
+                ocr_kwargs['progress_bar'] = False
+
             self.clear_error_buffer()
             with redirect_stderr(self.error_buffer):
-                ocr(self.input_file, self.output_file, **self.options)
+                ocr(self.input_file, self.output_file, **ocr_kwargs)
             captured_output = self.error_buffer.getvalue().replace(' ', '&nbsp;').replace('\n', '<br>')
             captured_output = f'<font color="blue" face="Courier New, monospace">{captured_output}</font>'
             self.finished.emit(True, captured_output + "OCR process completed successfully!")
