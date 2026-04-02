@@ -20,7 +20,7 @@ Dependencies:
 
 Usage:
 Run the script using Python 3:
-    python ocrmypdf_gui.py
+    python ocrmypdf_simplegui.py
 
 Features:
 - Select input and output PDF files
