@@ -25,13 +25,15 @@ Run the script using Python 3:
 Features:
 - Select input and output PDF files
 - Configure OCR options (deskew, language, rotate pages, etc.)
+- Configure PDF optimization level (0-3, default 1/lossless)
+- Show optimization help text via a clickable info symbol
 - Save and load settings
 - Drag-and-drop support for input files
 - Mouse pointer displays processing
 - Open output file automatically after OCR
 """
 
-DATEVERSION = "20250124-V01"
+DATEVERSION = "20260402-V01"
 AUTHOR = "https://github.com/active-idle/OCRmyPDF-SimpleGUI"
 
 import sys
@@ -41,7 +43,7 @@ import subprocess
 import webbrowser
 from typing import Dict, Any
 from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QLineEdit, QPushButton, QTextEdit, QVBoxLayout, QHBoxLayout,
-                             QGroupBox, QFileDialog, QCheckBox, QComboBox, QGridLayout, QSplitter, QProgressBar, QDialog, QSpacerItem, QSizePolicy)
+                             QGroupBox, QFileDialog, QCheckBox, QComboBox, QGridLayout, QSplitter, QProgressBar, QDialog, QSpacerItem, QSizePolicy, QToolButton, QToolTip)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QIcon, QPixmap, QCursor
 import io
@@ -190,22 +192,67 @@ class OCRmyPDFGUI(QWidget):
         self.language_label = QLabel('Language:', self)
         self.language_combo = QComboBox(self)
         self.language_combo.addItems(["deu", "eng", "fra", "spa", "ita", "nld", "por", "rus", "chi_sim", "jpn"])
+        self.language_combo.setCurrentText("eng")
+        self.language_combo.setMinimumWidth(70)
+        self.language_combo.setMaximumWidth(90)
+
+        self.optimize_label = QLabel('Optimize:', self)
+        self.optimize_combo = QComboBox(self)
+        self.optimize_combo.addItems(["0", "1", "2", "3"])
+        self.optimize_combo.setCurrentText("1")
+        self.optimize_combo.setMinimumWidth(70)
+        self.optimize_combo.setMaximumWidth(90)
+        self.optimize_info_btn = QToolButton(self)
+        self.optimize_info_btn.setText("i")
+        self.optimize_info_btn.setFixedSize(16, 16)
+        self.optimize_info_btn.setStyleSheet(
+            "QToolButton {"
+            "background-color: #1e88e5;"
+            "color: white;"
+            "border: none;"
+            "border-radius: 8px;"
+            "font-weight: bold;"
+            "font-size: 10px;"
+            "padding: 0px;"
+            "}"
+        )
+        self.optimize_info_btn.setToolTip(
+            "PDF optimization level:\n"
+            "0 = off\n"
+            "1 = lossless (default)\n"
+            "2 = some lossy optimization\n"
+            "3 = most aggressive optimization"
+        )
+        self.optimize_info_btn.setAutoRaise(True)
+        self.optimize_info_btn.clicked.connect(self.show_optimize_info)
 
         self.rotate_pages_checkbox = QCheckBox("Rotate pages", self)
         self.skip_text_checkbox = QCheckBox("Skip text", self)
 
         options_layout = QGridLayout()
+        options_layout.setHorizontalSpacing(10)
+        options_layout.setVerticalSpacing(10)
+        options_layout.setColumnStretch(0, 1)
+        options_layout.setColumnStretch(1, 1)
+        options_layout.setColumnStretch(2, 0)
         options_layout.addWidget(self.deskew_checkbox, 0, 0)
         options_layout.addWidget(self.open_output_checkbox, 0, 1)
+        options_layout.addWidget(self.language_label, 0, 2)
         options_layout.addWidget(self.force_ocr_checkbox, 1, 0)
         options_layout.addWidget(self.clean_final_checkbox, 1, 1)
+        options_layout.addWidget(self.language_combo, 1, 2)
         options_layout.addWidget(self.remove_background_checkbox, 2, 0)
         options_layout.addWidget(self.save_settings_checkbox, 2, 1)
+        optimize_label_layout = QHBoxLayout()
+        optimize_label_layout.setContentsMargins(0, 0, 0, 0)
+        optimize_label_layout.setSpacing(5)
+        optimize_label_layout.addWidget(self.optimize_label)
+        optimize_label_layout.addWidget(self.optimize_info_btn)
+        optimize_label_layout.addStretch()
+        options_layout.addLayout(optimize_label_layout, 2, 2)
         options_layout.addWidget(self.rotate_pages_checkbox, 3, 0)
-        options_layout.addWidget(self.language_label, 3, 1)
-        options_layout.addWidget(self.language_combo, 4, 1)
-        options_layout.addWidget(self.skip_text_checkbox, 4, 0)
-        self.language_combo.setMinimumWidth(300)
+        options_layout.addWidget(self.skip_text_checkbox, 3, 1)
+        options_layout.addWidget(self.optimize_combo, 3, 2)
         options_group_box.setLayout(options_layout)
 
         return options_group_box
@@ -300,6 +347,7 @@ class OCRmyPDFGUI(QWidget):
         return {
             'deskew': self.deskew_checkbox.isChecked(),
             'language': self.language_combo.currentText(),
+            'optimize': int(self.optimize_combo.currentText()),
             'rotate_pages': self.rotate_pages_checkbox.isChecked(),
             'force_ocr': self.force_ocr_checkbox.isChecked(),
             'skip_text': self.skip_text_checkbox.isChecked(),
@@ -332,6 +380,14 @@ class OCRmyPDFGUI(QWidget):
         about_dialog = AboutDialog()
         about_dialog.exec_()
 
+    def show_optimize_info(self):
+        """Show optimization explanation when the info button is clicked."""
+        QToolTip.showText(
+            self.optimize_info_btn.mapToGlobal(self.optimize_info_btn.rect().bottomLeft()),
+            self.optimize_info_btn.toolTip(),
+            self.optimize_info_btn
+        )
+
     def dragEnterEvent(self, event: QDragEnterEvent):
         """Handle drag enter events."""
         if event.mimeData().hasUrls():
@@ -359,6 +415,7 @@ class OCRmyPDFGUI(QWidget):
             "remove_background": self.remove_background_checkbox.isChecked(),
             "clean_final": self.clean_final_checkbox.isChecked(),
             "language": self.language_combo.currentText(),
+            "optimize": self.optimize_combo.currentText(),
             "open_output": self.open_output_checkbox.isChecked(),
             "save_settings": self.save_settings_checkbox.isChecked()
         }
@@ -380,6 +437,7 @@ class OCRmyPDFGUI(QWidget):
                 self.remove_background_checkbox.setChecked(settings.get("remove_background", False))
                 self.clean_final_checkbox.setChecked(settings.get("clean_final", False))
                 self.language_combo.setCurrentText(settings.get("language", "eng"))
+                self.optimize_combo.setCurrentText(str(settings.get("optimize", "1")))
                 self.open_output_checkbox.setChecked(settings.get("open_output", False))
                 self.save_settings_checkbox.setChecked(settings.get("save_settings", False))
                 self.output_text.append("Settings loaded.")

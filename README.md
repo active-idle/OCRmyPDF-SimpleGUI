@@ -18,11 +18,13 @@ input files.
 
 ## Usage
 Run the script using Python 3:
-    python ocrmypdf_gui.py
+    python ocrmypdf_simplegui.py
 
 ## Features
 - Select input and output PDF files
 - Configure OCR options (deskew, language, rotate pages, etc.)
+- Configure PDF optimization level (0-3, default 1/lossless)
+- Show optimization help text via a clickable info symbol
 - Save and load settings
 - Drag-and-drop support for input files
 - Mouse pointer displays processing
