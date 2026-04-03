@@ -3,20 +3,19 @@
 """
 OCRmyPDF SimpleGUI
 
-This application provides an easy-to-use graphical user interface (GUI) for performing
-Optical Character Recognition (OCR) on PDF files using the OCRmyPDF library. Users can
-select input and output PDF files, configure OCR options, and execute the OCR process.
-The application supports saving/loading settings and drag-and-drop functionality for
-input files.
+OCRmyPDF-SimpleGUI is a PyQt5 desktop app for performing OCR on PDF files with
+OCRmyPDF. It provides a simple interface to choose files, configure common OCR
+options, and run OCR while showing live progress output.
 
 Dependencies:
 - Python Libraries:
   - PyQt5: Install using `pip install PyQt5`
   - OCRmyPDF: Install using `pip install ocrmypdf`
 - External Tools:
-  - Tesseract OCR: OCR engine (apt-get install tesseract-ocr).
-  - Ghostscript: PDF processing tool (apt-get install ghostscript).
-  - Unpaper: Post-processing tool (apt-get install unpaper)
+  - Tesseract OCR: OCR engine
+  - Ghostscript: PDF processing tool
+  - pngquant: required for optimization levels 2 and 3
+  - Unpaper: post-processing tool used by OCRmyPDF on Linux
 
 Usage:
 Run the script using Python 3:
@@ -26,14 +25,17 @@ Features:
 - Select input and output PDF files
 - Configure OCR options (deskew, language, rotate pages, etc.)
 - Configure PDF optimization level (0-3, default 1/lossless)
-- Show optimization help text via a clickable info symbol
+- Show live command-line style OCR progress in the Messages panel
 - Save and load settings
 - Drag-and-drop support for input files
-- Mouse pointer displays processing
-- Open output file automatically after OCR
+
+Notes:
+- Depending on the installed OCRmyPDF version, `--remove-background` may be temporarily
+  unavailable for non-mono pages. In that case, OCRmyPDF raises:
+  `"--remove-background" is temporarily not implemented`.
 """
 
-DATEVERSION = "20260402-V01"
+DATEVERSION = "20260403-V01"
 AUTHOR = "https://github.com/active-idle/OCRmyPDF-SimpleGUI"
 
 import sys
@@ -41,23 +43,36 @@ import json
 import os
 import subprocess
 import webbrowser
-import inspect
+import shutil
+import re
+import html
+import pty
+import select
 from typing import Dict, Any
 from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QLineEdit, QPushButton, QTextEdit, QVBoxLayout, QHBoxLayout,
-                             QGroupBox, QFileDialog, QCheckBox, QComboBox, QGridLayout, QSplitter, QProgressBar, QDialog, QSpacerItem, QSizePolicy, QToolButton, QToolTip)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
-from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QIcon, QPixmap, QCursor
-import io
-from contextlib import redirect_stderr
+                             QGroupBox, QFileDialog, QCheckBox, QComboBox, QGridLayout, QSplitter, QDialog, QSpacerItem, QSizePolicy, QToolButton, QToolTip)
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QIcon, QPixmap
 
 SETTINGS_FILE = "." + os.path.splitext(os.path.basename(__file__))[0] + ".json"
 PDF_FILTER = "PDF files (*.pdf)"
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 ICON_PATH = os.path.join(SCRIPT_DIR, 'ocrmypdf_simplegui.png')
 
+
+def _prepend_host_bin_path():
+    """Expose host binaries when running from a containerized/dev environment."""
+    host_bin = "/run/host/bin"
+    current_path = os.environ.get("PATH", "")
+    if os.path.isdir(host_bin) and host_bin not in current_path.split(os.pathsep):
+        os.environ["PATH"] = host_bin + os.pathsep + current_path
+
+
+_prepend_host_bin_path()
+
 class OCRWorker(QThread):
     finished = pyqtSignal(bool, str)
-    error_buffer = io.StringIO()
+    progress = pyqtSignal(str)
 
     def __init__(self, input_file: str, output_file: str, options: Dict[str, Any]):
         super().__init__()
@@ -68,29 +83,214 @@ class OCRWorker(QThread):
     def run(self):
         """Run the OCR process in a separate thread."""
         try:
-            from ocrmypdf import ocr
-            ocr_signature = inspect.signature(ocr)
-            ocr_kwargs = dict(self.options)
-
-            # Rich-style progress rendering can fail in some GUI/non-TTY contexts.
-            # Disable it when the installed OCRmyPDF API supports this option.
-            if 'progress_bar' in ocr_signature.parameters:
-                ocr_kwargs['progress_bar'] = False
-
-            self.clear_error_buffer()
-            with redirect_stderr(self.error_buffer):
-                ocr(self.input_file, self.output_file, **ocr_kwargs)
-            captured_output = self.error_buffer.getvalue().replace(' ', '&nbsp;').replace('\n', '<br>')
+            self.ensure_external_dependencies()
+            captured_text = self.run_cli_fallback()
+            captured_output = captured_text.replace(' ', '&nbsp;').replace('\n', '<br>')
             captured_output = f'<font color="blue" face="Courier New, monospace">{captured_output}</font>'
-            self.finished.emit(True, captured_output + "OCR process completed successfully!")
+            if captured_output and captured_output != '<font color="blue" face="Courier New, monospace"></font>':
+                self.finished.emit(True, captured_output + "<br><br>OCR process completed successfully!")
+            else:
+                self.finished.emit(True, "OCR process completed successfully!")
         except Exception as e:
-            captured_output = self.error_buffer.getvalue().rstrip('\n')
-            self.finished.emit(False, str(e) + captured_output)
+            self.finished.emit(False, str(e))
 
-    def clear_error_buffer(self):
-        """Clear the error buffer."""
-        self.error_buffer.truncate(0)
-        self.error_buffer.seek(0)
+    def ensure_external_dependencies(self):
+        """Validate required external tools before invoking OCRmyPDF."""
+        missing = []
+
+        if not shutil.which("tesseract"):
+            missing.append("tesseract")
+
+        if sys.platform == "win32":
+            gs_cmds = ("gswin64c", "gswin32c", "gs")
+        else:
+            gs_cmds = ("gs",)
+        if not any(shutil.which(cmd) for cmd in gs_cmds):
+            missing.append("ghostscript (gs)")
+
+        optimize_level = int(self.options.get("optimize", 1))
+        if optimize_level >= 2 and not shutil.which("pngquant"):
+            missing.append("pngquant (required for optimize levels 2 and 3)")
+
+        if missing:
+            raise RuntimeError(
+                "Missing external tools on PATH: "
+                + ", ".join(missing)
+                + ". Install them and restart the app from the same terminal."
+            )
+
+    def run_cli_fallback(self):
+        """Run OCRmyPDF via CLI with equivalent options and stream progress output."""
+        cmd = [sys.executable, "-m", "ocrmypdf"]
+
+        if self.options.get("deskew"):
+            cmd.append("--deskew")
+        if self.options.get("language"):
+            cmd.extend(["--language", str(self.options["language"])])
+        if "optimize" in self.options:
+            cmd.extend(["--optimize", str(self.options["optimize"])])
+        if self.options.get("rotate_pages"):
+            cmd.append("--rotate-pages")
+        if self.options.get("force_ocr"):
+            cmd.append("--force-ocr")
+        if self.options.get("skip_text"):
+            cmd.append("--skip-text")
+        if self.options.get("remove_background"):
+            cmd.append("--remove-background")
+        if self.options.get("clean_final"):
+            cmd.append("--clean-final")
+
+        cmd.extend([self.input_file, self.output_file])
+        self.progress.emit("Starting OCRmyPDF...")
+
+        lines = []
+        in_traceback = False
+        suppress_progress_after_error = False
+
+        def emit_line(raw_line):
+            nonlocal in_traceback, suppress_progress_after_error
+            line = self._clean_terminal_line(raw_line)
+            if not line:
+                return
+
+            # Suppress verbose traceback internals from the live progress stream.
+            if line.startswith("Traceback (most recent call last):"):
+                in_traceback = True
+                return
+            if in_traceback:
+                if re.match(r"^[A-Za-z_]+Error:", line):
+                    in_traceback = False
+                else:
+                    return
+
+            if line and (not lines or lines[-1] != line):
+                lines.append(line)
+                # Keep progress area clean: once an error starts, show only final red message.
+                if line.startswith("An exception occurred while executing the pipeline"):
+                    suppress_progress_after_error = True
+                    return
+                if re.match(r"^[A-Za-z_]+Error:", line):
+                    suppress_progress_after_error = True
+                    return
+                if not suppress_progress_after_error:
+                    self.progress.emit(line)
+
+        if os.name == "posix":
+            try:
+                master_fd, slave_fd = pty.openpty()
+                process = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=slave_fd,
+                    stderr=slave_fd,
+                    close_fds=True,
+                )
+                os.close(slave_fd)
+                buffer = []
+
+                while True:
+                    ready, _, _ = select.select([master_fd], [], [], 0.2)
+                    if ready:
+                        try:
+                            chunk = os.read(master_fd, 4096).decode("utf-8", errors="replace")
+                        except OSError:
+                            break
+                        if not chunk:
+                            if process.poll() is not None:
+                                break
+                            continue
+
+                        for char in chunk:
+                            if char in ("\r", "\n"):
+                                if buffer:
+                                    emit_line("".join(buffer))
+                                    buffer = []
+                            else:
+                                buffer.append(char)
+
+                    if process.poll() is not None and not ready:
+                        break
+
+                if buffer:
+                    emit_line("".join(buffer))
+                os.close(master_fd)
+                returncode = process.wait()
+            except Exception:
+                returncode = self._run_cli_fallback_pipe(cmd, emit_line)
+        else:
+            returncode = self._run_cli_fallback_pipe(cmd, emit_line)
+
+        output_text = "\n".join(lines).strip()
+        if returncode != 0:
+            raise RuntimeError(self._summarize_cli_error(output_text, returncode))
+        return output_text
+
+    def _clean_terminal_line(self, text: str) -> str:
+        """Strip ANSI/OSC control sequences and unreadable control chars."""
+        # OSC hyperlinks/title sequences (e.g. \x1b]8;;url\x1b\\label\x1b]8;;\x1b\\)
+        text = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)", "", text)
+        # CSI ANSI sequences
+        text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+        # Any remaining single ESC-prefixed codes
+        text = re.sub(r"\x1b[@-_]", "", text)
+        # Remove leftover control chars except tab/newline/carriage return
+        text = re.sub(r"[\x00-\x08\x0B-\x1F\x7F]", "", text)
+        return text.strip()
+
+    def _summarize_cli_error(self, output_text: str, returncode: int) -> str:
+        """Convert verbose CLI errors into concise, actionable GUI messages."""
+        text = (output_text or "").strip()
+        lower = text.lower()
+        lower_compact = re.sub(r"\s+", " ", lower)
+
+        if "remove-background is temporarily not implemented" in lower_compact:
+            return (
+                '"--remove-background" is temporarily not implemented '
+                "(raised by OCRmyPDF preprocess_remove_background in _pipeline.py)"
+            )
+
+        if "page already has text" in lower:
+            return (
+                "Input PDF already contains text. Use 'Force OCR' to OCR all pages, "
+                "or 'Skip text' to leave text pages unchanged."
+            )
+
+        if text:
+            lines = [line for line in text.splitlines() if line.strip()]
+            tail = lines[-12:] if len(lines) > 12 else lines
+            return "\n".join(tail)
+
+        return f"ocrmypdf exited with code {returncode}"
+
+    def _run_cli_fallback_pipe(self, cmd, emit_line):
+        """Fallback streaming mode for platforms where PTY is unavailable."""
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True,
+        )
+        assert process.stdout is not None
+        buffer = []
+
+        while True:
+            char = process.stdout.read(1)
+            if char == "" and process.poll() is not None:
+                break
+            if not char:
+                continue
+            if char in ("\r", "\n"):
+                if buffer:
+                    emit_line("".join(buffer))
+                    buffer = []
+                continue
+            buffer.append(char)
+
+        if buffer:
+            emit_line("".join(buffer))
+        return process.wait()
 
 class AboutDialog(QDialog):
     def __init__(self):
@@ -130,7 +330,6 @@ class OCRmyPDFGUI(QWidget):
     def __init__(self):
         """Initialize the application window and UI components."""
         super().__init__()
-        self.ocr_performed = False
         self.initUI()
         self.load_settings()
 
@@ -331,6 +530,7 @@ class OCRmyPDFGUI(QWidget):
 
         self.ocr_worker = OCRWorker(input_file, output_file, options)
         self.ocr_worker.finished.connect(self.ocr_finished)
+        self.ocr_worker.progress.connect(self.ocr_progress)
         self.ocr_btn.setEnabled(False)
         self.set_busy_cursor()  # Set busy cursor
         self.ocr_worker.start()
@@ -344,12 +544,16 @@ class OCRmyPDFGUI(QWidget):
             self.output_text.append(message)
             if self.open_output_checkbox.isChecked():
                 self.open_output_file(self.output_entry.text())
-            self.ocr_performed = True
         else:
             self.display_error_message(f"Error during OCR process: {message}")
 
         if self.save_settings_checkbox.isChecked():
             self.save_settings()
+
+    def ocr_progress(self, message: str):
+        """Append live OCR progress output in monospace blue text."""
+        safe_text = html.escape(message).replace(' ', '&nbsp;')
+        self.output_text.append(f'<font color="blue" face="Courier New, monospace">{safe_text}</font>')
 
     def collect_options(self):
         """Collect the OCR options from the UI."""
@@ -460,10 +664,6 @@ class OCRmyPDFGUI(QWidget):
     def set_busy_cursor(self):
         """Set the busy cursor during the OCR process."""
         QApplication.setOverrideCursor(Qt.BusyCursor)
-
-    def update_cursor(self):
-        """This method is no longer needed and can be removed."""
-        pass
 
     def restore_cursor(self):
         """Restore the cursor to its default shape."""

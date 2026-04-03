@@ -1,2 +1,9 @@
 .gitconfig
 __pycache__/
+.venv/
+.pytest_cache
+*.py[cod]
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
