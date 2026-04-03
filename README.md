@@ -3,7 +3,7 @@ OCRmyPDF-SimpleGUI is a PyQt5 desktop app for performing OCR on PDF files with
 OCRmyPDF. It provides a simple interface to choose files, configure common OCR
 options, and run OCR while showing live progress output.
 
-![Alt text](./gui.png)
+<img src="./gui.png" width="400" alt="Alt text">
 
 ## Dependencies
 - Python Libraries:
@@ -32,7 +32,7 @@ python ocrmypdf_simplegui.py
 ## Notes
 - Depending on the installed OCRmyPDF version, `--remove-background` may be temporarily
   unavailable for non-mono pages. In that case, OCRmyPDF raises:
-  `"--remove-background" is temporarily not implemented`.
+  "--remove-background" is temporarily not implemented.
 
 ## Donation
 Thank you very much for a donation in recognition of my work --> [![PayPal Donate](https://img.shields.io/badge/paypal-donate-yellow.svg)](https://www.paypal.com/paypalme/MrDagoo/)
