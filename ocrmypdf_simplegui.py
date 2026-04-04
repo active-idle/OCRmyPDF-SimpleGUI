@@ -46,6 +46,7 @@ import webbrowser
 import shutil
 import re
 import html
+import shlex
 import pty
 import select
 from typing import Dict, Any
@@ -54,9 +55,9 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QLineEdit, QPushButt
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QIcon, QPixmap
 
-SETTINGS_FILE = "." + os.path.splitext(os.path.basename(__file__))[0] + ".json"
-PDF_FILTER = "PDF files (*.pdf)"
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+SETTINGS_FILE = os.path.join(SCRIPT_DIR, "." + os.path.splitext(os.path.basename(__file__))[0] + ".json")
+PDF_FILTER = "PDF files (*.pdf)"
 ICON_PATH = os.path.join(SCRIPT_DIR, 'ocrmypdf_simplegui.png')
 
 
@@ -85,7 +86,7 @@ class OCRWorker(QThread):
         try:
             self.ensure_external_dependencies()
             captured_text = self.run_cli_fallback()
-            captured_output = captured_text.replace(' ', '&nbsp;').replace('\n', '<br>')
+            captured_output = html.escape(captured_text).replace(' ', '&nbsp;').replace('\n', '<br>')
             captured_output = f'<font color="blue" face="Courier New, monospace">{captured_output}</font>'
             if captured_output and captured_output != '<font color="blue" face="Courier New, monospace"></font>':
                 self.finished.emit(True, captured_output + "<br><br>OCR process completed successfully!")
@@ -141,6 +142,7 @@ class OCRWorker(QThread):
             cmd.append("--clean-final")
 
         cmd.extend([self.input_file, self.output_file])
+        self.progress.emit(f"$ {self._format_command_for_display(cmd)}")
         self.progress.emit("Starting OCRmyPDF...")
 
         lines = []
@@ -176,6 +178,10 @@ class OCRWorker(QThread):
                     self.progress.emit(line)
 
         if os.name == "posix":
+            master_fd = None
+            slave_fd = None
+            process = None
+            buffer = []
             try:
                 master_fd, slave_fd = pty.openpty()
                 process = subprocess.Popen(
@@ -186,7 +192,7 @@ class OCRWorker(QThread):
                     close_fds=True,
                 )
                 os.close(slave_fd)
-                buffer = []
+                slave_fd = None
 
                 while True:
                     ready, _, _ = select.select([master_fd], [], [], 0.2)
@@ -213,10 +219,29 @@ class OCRWorker(QThread):
 
                 if buffer:
                     emit_line("".join(buffer))
-                os.close(master_fd)
                 returncode = process.wait()
-            except Exception:
-                returncode = self._run_cli_fallback_pipe(cmd, emit_line)
+            except Exception as e:
+                if process is None:
+                    returncode = self._run_cli_fallback_pipe(cmd, emit_line)
+                else:
+                    if process.poll() is None:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                    raise RuntimeError(f"Failed while streaming OCRmyPDF output: {e}") from e
+            finally:
+                if slave_fd is not None:
+                    try:
+                        os.close(slave_fd)
+                    except OSError:
+                        pass
+                if master_fd is not None:
+                    try:
+                        os.close(master_fd)
+                    except OSError:
+                        pass
         else:
             returncode = self._run_cli_fallback_pipe(cmd, emit_line)
 
@@ -224,6 +249,12 @@ class OCRWorker(QThread):
         if returncode != 0:
             raise RuntimeError(self._summarize_cli_error(output_text, returncode))
         return output_text
+
+    def _format_command_for_display(self, cmd) -> str:
+        """Render command list as a shell-like string for the GUI log."""
+        if os.name == "nt":
+            return subprocess.list2cmdline(cmd)
+        return shlex.join(cmd)
 
     def _clean_terminal_line(self, text: str) -> str:
         """Strip ANSI/OSC control sequences and unreadable control chars."""
@@ -436,6 +467,8 @@ class OCRmyPDFGUI(QWidget):
 
         self.rotate_pages_checkbox = QCheckBox("Rotate pages", self)
         self.skip_text_checkbox = QCheckBox("Skip text", self)
+        self.force_ocr_checkbox.toggled.connect(self.on_force_ocr_toggled)
+        self.skip_text_checkbox.toggled.connect(self.on_skip_text_toggled)
 
         options_layout = QGridLayout()
         options_layout.setHorizontalSpacing(10)
@@ -553,6 +586,13 @@ class OCRmyPDFGUI(QWidget):
     def ocr_progress(self, message: str):
         """Append live OCR progress output in monospace blue text."""
         safe_text = html.escape(message).replace(' ', '&nbsp;')
+        if message.startswith("$ "):
+            self.output_text.append(
+                '<span style="color:#0b5394; background-color:#eaf3ff; '
+                'font-family:\'Courier New\', monospace; font-weight:600;">'
+                f"{safe_text}</span>"
+            )
+            return
         self.output_text.append(f'<font color="blue" face="Courier New, monospace">{safe_text}</font>')
 
     def collect_options(self):
@@ -567,6 +607,20 @@ class OCRmyPDFGUI(QWidget):
             'remove_background': self.remove_background_checkbox.isChecked(),
             'clean_final': self.clean_final_checkbox.isChecked()
         }
+
+    def on_force_ocr_toggled(self, checked: bool):
+        """Prevent selecting Force OCR together with Skip text."""
+        if checked and self.skip_text_checkbox.isChecked():
+            self.skip_text_checkbox.setChecked(False)
+            self.output_text.append("Disabled 'Skip text' because it conflicts with 'Force OCR'.")
+        self.skip_text_checkbox.setEnabled(not checked)
+
+    def on_skip_text_toggled(self, checked: bool):
+        """Prevent selecting Skip text together with Force OCR."""
+        if checked and self.force_ocr_checkbox.isChecked():
+            self.force_ocr_checkbox.setChecked(False)
+            self.output_text.append("Disabled 'Force OCR' because it conflicts with 'Skip text'.")
+        self.force_ocr_checkbox.setEnabled(not checked)
 
     def display_error_message(self, message):
         """Display an error message in the output text area."""
@@ -632,28 +686,39 @@ class OCRmyPDFGUI(QWidget):
             "open_output": self.open_output_checkbox.isChecked(),
             "save_settings": self.save_settings_checkbox.isChecked()
         }
-        with open(SETTINGS_FILE, "w") as file:
-            json.dump(settings, file)
+        try:
+            with open(SETTINGS_FILE, "w", encoding="utf-8") as file:
+                json.dump(settings, file)
+        except OSError as e:
+            self.display_error_message(f"Could not save settings: {e}")
+            return
         self.output_text.append("Settings saved.\n")
 
     def load_settings(self):
         """Load settings from the JSON file if it exists."""
         if os.path.exists(SETTINGS_FILE):
-            with open(SETTINGS_FILE, "r") as file:
-                settings = json.load(file)
-                self.input_entry.setText(settings.get("input_file", ""))
-                self.output_entry.setText(settings.get("output_file", ""))
-                self.deskew_checkbox.setChecked(settings.get("deskew", False))
-                self.rotate_pages_checkbox.setChecked(settings.get("rotate_pages", False))
-                self.force_ocr_checkbox.setChecked(settings.get("force_ocr", False))
-                self.skip_text_checkbox.setChecked(settings.get("skip_text", False))
-                self.remove_background_checkbox.setChecked(settings.get("remove_background", False))
-                self.clean_final_checkbox.setChecked(settings.get("clean_final", False))
-                self.language_combo.setCurrentText(settings.get("language", "eng"))
-                self.optimize_combo.setCurrentText(str(settings.get("optimize", "1")))
-                self.open_output_checkbox.setChecked(settings.get("open_output", False))
-                self.save_settings_checkbox.setChecked(settings.get("save_settings", False))
-                self.output_text.append("Settings loaded.")
+            try:
+                with open(SETTINGS_FILE, "r", encoding="utf-8") as file:
+                    settings = json.load(file)
+            except (OSError, json.JSONDecodeError) as e:
+                self.display_error_message(f"Could not load settings: {e}")
+                return
+
+            self.input_entry.setText(settings.get("input_file", ""))
+            self.output_entry.setText(settings.get("output_file", ""))
+            self.deskew_checkbox.setChecked(settings.get("deskew", False))
+            self.rotate_pages_checkbox.setChecked(settings.get("rotate_pages", False))
+            self.force_ocr_checkbox.setChecked(settings.get("force_ocr", False))
+            self.skip_text_checkbox.setChecked(settings.get("skip_text", False))
+            self.remove_background_checkbox.setChecked(settings.get("remove_background", False))
+            self.clean_final_checkbox.setChecked(settings.get("clean_final", False))
+            self.language_combo.setCurrentText(settings.get("language", "eng"))
+            self.optimize_combo.setCurrentText(str(settings.get("optimize", "1")))
+            self.open_output_checkbox.setChecked(settings.get("open_output", False))
+            self.save_settings_checkbox.setChecked(settings.get("save_settings", False))
+            self.on_force_ocr_toggled(self.force_ocr_checkbox.isChecked())
+            self.on_skip_text_toggled(self.skip_text_checkbox.isChecked())
+            self.output_text.append("Settings loaded.")
 
     def closeEvent(self, event):
         """Handle the close event to optionally save settings."""
