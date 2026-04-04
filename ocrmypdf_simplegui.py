@@ -1,38 +1,14 @@
 #!/usr/bin/env python3
 
 """
-OCRmyPDF SimpleGUI
+OCRmyPDF SimpleGUI.
 
-OCRmyPDF-SimpleGUI is a PyQt5 desktop app for performing OCR on PDF files with
-OCRmyPDF. It provides a simple interface to choose files, configure common OCR
-options, and run OCR while showing live progress output.
+Small PyQt5 frontend for running OCRmyPDF on local PDF files.
+The app executes `python -m ocrmypdf` in a worker thread and streams
+sanitized progress output into the GUI.
 
-Dependencies:
-- Python Libraries:
-  - PyQt5: Install using `pip install PyQt5`
-  - OCRmyPDF: Install using `pip install ocrmypdf`
-- External Tools:
-  - Tesseract OCR: OCR engine
-  - Ghostscript: PDF processing tool
-  - pngquant: required for optimization levels 2 and 3
-  - Unpaper: post-processing tool used by OCRmyPDF on Linux
-
-Usage:
-Run the script using Python 3:
-    python ocrmypdf_simplegui.py
-
-Features:
-- Select input and output PDF files
-- Configure OCR options (deskew, language, rotate pages, etc.)
-- Configure PDF optimization level (0-3, default 1/lossless)
-- Show live command-line style OCR progress in the Messages panel
-- Save and load settings
-- Drag-and-drop support for input files
-
-Notes:
-- Depending on the installed OCRmyPDF version, `--remove-background` may be temporarily
-  unavailable for non-mono pages. In that case, OCRmyPDF raises:
-  `"--remove-background" is temporarily not implemented`.
+Settings are stored in a JSON file next to this script:
+`.ocrmypdf_simplegui.json`.
 """
 
 DATEVERSION = "20260403-V01"
@@ -49,7 +25,7 @@ import html
 import shlex
 import pty
 import select
-from typing import Dict, Any
+from typing import Any, Dict, Optional, Tuple
 from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QLineEdit, QPushButton, QTextEdit, QVBoxLayout, QHBoxLayout,
                              QGroupBox, QFileDialog, QCheckBox, QComboBox, QGridLayout, QSplitter, QDialog, QSpacerItem, QSizePolicy, QToolButton, QToolTip)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
@@ -59,6 +35,7 @@ SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 SETTINGS_FILE = os.path.join(SCRIPT_DIR, "." + os.path.splitext(os.path.basename(__file__))[0] + ".json")
 PDF_FILTER = "PDF files (*.pdf)"
 ICON_PATH = os.path.join(SCRIPT_DIR, 'ocrmypdf_simplegui.png')
+OCRMYPDF_DOCS_URL = "https://ocrmypdf.readthedocs.io/en/latest/"
 
 
 def _prepend_host_bin_path():
@@ -301,7 +278,6 @@ class OCRWorker(QThread):
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
-            universal_newlines=True,
         )
         assert process.stdout is not None
         buffer = []
@@ -345,11 +321,10 @@ class AboutDialog(QDialog):
         scaled_pixmap = pixmap.scaled(70, 70, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         icon_label.setPixmap(scaled_pixmap)
 
-        # Add a vertical spacer item
         spacer = QSpacerItem(20, 10, QSizePolicy.Minimum, QSizePolicy.Expanding)
 
         main_layout.addWidget(icon_label, 0, 0, Qt.AlignLeft | Qt.AlignVCenter)
-        main_layout.addItem(spacer, 0, 1)  # Add spacer between icon and text
+        main_layout.addItem(spacer, 0, 1)
         main_layout.addLayout(text_layout, 0, 2, Qt.AlignLeft | Qt.AlignVCenter)
 
         self.setLayout(main_layout)
@@ -365,7 +340,7 @@ class OCRmyPDFGUI(QWidget):
         self.load_settings()
 
     def initUI(self):
-        """Set up the user interface layout and components."""
+        """Build the main window and connect core actions."""
         self.setAcceptDrops(True)
 
         file_group_box = self.create_file_group_box()
@@ -375,9 +350,9 @@ class OCRmyPDFGUI(QWidget):
         main_layout = QVBoxLayout()
         main_layout.addWidget(file_group_box)
         main_layout.addWidget(options_group_box)
-        main_layout.addSpacing(10)  # Increase space before buttons
+        main_layout.addSpacing(10)
         main_layout.addLayout(button_layout)
-        main_layout.addSpacing(10)  # Increase space after buttons
+        main_layout.addSpacing(10)
         main_layout.addWidget(self.create_splitter())
 
         self.setLayout(main_layout)
@@ -551,13 +526,11 @@ class OCRmyPDFGUI(QWidget):
         self.output_text.append(f"Default output file set to: {default_output_name}")
 
     def perform_ocr(self):
-        """Perform the OCR process using the selected options."""
-        input_file = self.input_entry.text()
-        output_file = self.output_entry.text()
-
-        if not input_file or not output_file:
-            self.display_error_message("Please select both input and output files.")
+        """Validate paths and start OCR in a background worker thread."""
+        validated_paths = self.validate_paths(self.input_entry.text(), self.output_entry.text())
+        if not validated_paths:
             return
+        input_file, output_file = validated_paths
 
         options = self.collect_options()
 
@@ -565,7 +538,7 @@ class OCRmyPDFGUI(QWidget):
         self.ocr_worker.finished.connect(self.ocr_finished)
         self.ocr_worker.progress.connect(self.ocr_progress)
         self.ocr_btn.setEnabled(False)
-        self.set_busy_cursor()  # Set busy cursor
+        self.set_busy_cursor()
         self.ocr_worker.start()
 
     def ocr_finished(self, success: bool, message: str):
@@ -608,6 +581,43 @@ class OCRmyPDFGUI(QWidget):
             'clean_final': self.clean_final_checkbox.isChecked()
         }
 
+    def validate_paths(self, input_file: str, output_file: str) -> Optional[Tuple[str, str]]:
+        """Validate and normalize input/output paths before running OCR."""
+        input_file = input_file.strip()
+        output_file = output_file.strip()
+
+        if not input_file or not output_file:
+            self.display_error_message("Please select both input and output files.")
+            return None
+
+        input_abs = os.path.abspath(input_file)
+        output_abs = os.path.abspath(output_file)
+
+        if not os.path.isfile(input_abs):
+            self.display_error_message(f"Input file does not exist: {input_abs}")
+            return None
+
+        if not input_abs.lower().endswith(".pdf"):
+            self.display_error_message("Input file must be a PDF (*.pdf).")
+            return None
+
+        if not output_abs.lower().endswith(".pdf"):
+            self.display_error_message("Output file must end with .pdf.")
+            return None
+
+        if input_abs == output_abs:
+            self.display_error_message("Input and output files must be different.")
+            return None
+
+        output_dir = os.path.dirname(output_abs) or "."
+        if not os.path.isdir(output_dir):
+            self.display_error_message(f"Output directory does not exist: {output_dir}")
+            return None
+
+        self.input_entry.setText(input_abs)
+        self.output_entry.setText(output_abs)
+        return input_abs, output_abs
+
     def on_force_ocr_toggled(self, checked: bool):
         """Prevent selecting Force OCR together with Skip text."""
         if checked and self.skip_text_checkbox.isChecked():
@@ -639,7 +649,7 @@ class OCRmyPDFGUI(QWidget):
 
     def open_help(self):
         """Open the OCRmyPDF documentation in the web browser."""
-        webbrowser.open("https://ocrmypdf.readthedocs.io/en/latest/")
+        webbrowser.open(OCRMYPDF_DOCS_URL)
         self.output_text.append("Opened OCRmyPDF documentation in the web browser.")
 
     def open_about(self):
